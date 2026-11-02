@@ -68,6 +68,16 @@ class LocalQueueService {
       whereArgs: [id],
     );
   }
+  
+Future<void> deleteClient(String id) async {
+  final db = await database;
+  await db.delete(
+    tableName,
+    where: 'id = ?',
+    whereArgs: [id],
+  );
+}
+
 
   Future<void> close() async {
     final db = _database;

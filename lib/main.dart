@@ -11,17 +11,23 @@ Future<void> main() async {
 
   await Supabase.initialize(
     url: dotenv.env['SUPABASE_URL']!,
-    anonKey: dotenv.env['SUPABASE_ANON_KEY']!,
+    publishableKey: dotenv.env['SUPABASE_ANON_KEY']!,
   );
 
+  // Connexion anonyme : nécessite du réseau au premier lancement.
+  // On l'entoure d'un try/catch pour que l'app démarre aussi hors-ligne.
   final auth = Supabase.instance.client.auth;
   if (auth.currentSession == null) {
-    await auth.signInAnonymously(); // lève une AuthException en cas d'erreur
+    try {
+      await auth.signInAnonymously();
+    } catch (e) {
+      debugPrint('Anonymous sign-in failed (offline ?): $e');
+    }
   }
 
   runApp(
     ChangeNotifierProvider(
-      create: (_) => QueueProvider(),
+      create: (_) => QueueProvider()..initialize(),
       child: const WaitingRoomApp(),
     ),
   );
