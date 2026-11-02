@@ -2,6 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'queue_provider.dart';
 
+/// Widget racine de l'application Waiting Room.
+///
+/// Configure le thème Material et définit [WaitingRoomPage] comme écran
+/// principal.
 class WaitingRoomApp extends StatelessWidget {
   const WaitingRoomApp({super.key});
 
@@ -15,6 +19,16 @@ class WaitingRoomApp extends StatelessWidget {
   }
 }
 
+/// Page principale affichant la file d'attente.
+///
+/// Permet à l'utilisateur de :
+/// - **Ajouter** un client (champ texte + bouton « Add »)
+/// - **Voir** la liste ordonnée des clients avec leur date d'inscription
+/// - **Supprimer** un client individuel (icône poubelle)
+/// - **Passer au suivant** (bouton « Next Client » – supprime le premier de la file)
+///
+/// Utilise [Consumer] de `provider` pour se reconstruire automatiquement
+/// dès que [QueueProvider] notifie un changement.
 class WaitingRoomPage extends StatefulWidget {
   const WaitingRoomPage({super.key});
   @override
@@ -24,9 +38,33 @@ class WaitingRoomPage extends StatefulWidget {
 class _WaitingRoomPageState extends State<WaitingRoomPage> {
   final _controller = TextEditingController();
 
-  void _add() {
-    context.read<QueueProvider>().addClient(_controller.text);
+  /// Lit le nom saisi, appelle [QueueProvider.addClient] et gère les erreurs.
+  ///
+  /// Affiche un [SnackBar] si le champ est vide ou si l'ajout échoue.
+  Future<void> _add() async {
+    final name = _controller.text.trim();
+
+    if (name.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Enter a client name.')),
+      );
+      return;
+    }
+
     _controller.clear();
+
+    try {
+      await context.read<QueueProvider>().addClient(name);
+    } catch (e, stackTrace) {
+      debugPrint('Add client error: $e');
+      debugPrintStack(stackTrace: stackTrace);
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Unable to add client: $e')),
+      );
+    }
   }
 
   @override

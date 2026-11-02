@@ -1,79 +1,307 @@
-# Waiting Room App – Flutter Workshop 3
+# Waiting Room App – Flutter TP5
 
-Une application Flutter de salle d'attente refactorisée dans le cadre du **Workshop 3** (Provider & Scalable State Management with TDD).
+> Application Flutter de salle d'attente avec **géolocalisation GPS**, persistance locale **SQLite**, synchronisation temps réel **Supabase** et gestion d'état via **Provider**.
 
-## 📄 Documentation
+---
 
-| Document | Description |
-|----------|-------------|
-| [`Compte_rendu_Workshop3.pdf`](docs/Compte_rendu_Workshop3.pdf) | Compte rendu du Workshop 3 – **Trace d'exécution** (Provider & TDD) |
-| [`Prompts_Workshop3.pdf`](docs/Prompts_Workshop3.pdf) | Prompts importants et résumé des étapes du Workshop 3 |
+## 📋 Table des matières
 
-## 🚀 Démarrage rapide
+- [Aperçu](#aperçu)
+- [Fonctionnalités](#fonctionnalités)
+- [Architecture](#architecture)
+- [Technologies utilisées](#technologies-utilisées)
+- [Structure du projet](#structure-du-projet)
+- [Installation et configuration](#installation-et-configuration)
+- [Configuration de l'émulateur Android](#configuration-de-lémulateur-android)
+- [Lancer les tests](#lancer-les-tests)
+- [Logs attendus](#logs-attendus)
+- [Documentation du code](#documentation-du-code)
+- [Auteur](#auteur)
 
-### Prérequis
+---
 
-- Flutter SDK installé ([flutter.dev](https://flutter.dev))
-- Un émulateur Android/iOS ou un appareil physique
+## Aperçu
 
-### Installation
+`waiting_room_app` est une application Flutter multi-couches qui permet de gérer une file d'attente de clients. Chaque client est enregistré avec :
 
-```bash
-# Cloner le repository
-git clone https://github.com/AmenallahBensalem/TP3_flutter.git
-cd TP3_flutter
+- Son **nom**
+- Sa **position GPS** (latitude, longitude) au moment de l'ajout
+- Sa **date/heure** d'inscription
+- Son **statut de synchronisation** avec Supabase
 
-# Installer les dépendances
-flutter pub get
+L'application fonctionne **hors ligne** (SQLite comme source de vérité locale) et se synchronise automatiquement avec Supabase dès qu'une connexion réseau est disponible.
 
-# Lancer l'application
-flutter run
+---
+
+## Fonctionnalités
+
+| Fonctionnalité | Description |
+|---|---|
+| ➕ Ajout de client | Enregistrement avec nom + coordonnées GPS |
+| 📍 Géolocalisation GPS | Récupération robuste avec `getLastKnownPosition` + fallback `getCurrentPosition` |
+| 💾 Persistance locale | SQLite via `sqflite` (offline-first) |
+| ☁️ Synchronisation Supabase | `upsert` automatique dès connexion disponible |
+| 🔄 Temps réel | Écoute du stream Supabase pour les mises à jour distantes |
+| ⏩ Client suivant | Retire le premier client de la file |
+| 🗑️ Suppression | Suppression locale + distante |
+| 📶 Détection réseau | `connectivity_plus` pour déclencher la sync au retour en ligne |
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│                     UI Layer                     │
+│         WaitingRoomApp / WaitingRoomPage          │
+│              (StatefulWidget + Consumer)          │
+└──────────────────────┬──────────────────────────┘
+                       │ Provider
+┌──────────────────────▼──────────────────────────┐
+│               QueueProvider                      │
+│        (ChangeNotifier – State Manager)          │
+│                                                  │
+│  addClient()  removeClient()  nextClient()       │
+│  _syncLocalToRemote()  _listen()  initialize()   │
+└──────┬──────────────────────┬───────────────────┘
+       │                      │
+┌──────▼──────┐    ┌──────────▼───────┐    ┌──────────────────┐
+│ Geolocation │    │ LocalQueueService │    │  SupabaseClient  │
+│  Service    │    │   (sqflite)       │    │  (realtime +     │
+│             │    │                   │    │   upsert)        │
+│getLastKnown │    │ insertClientLocal │    │ stream(clients)  │
+│getCurrentPos│    │ getUnsyncedClients│    │ upsert()         │
+└─────────────┘    └───────────────────┘    └──────────────────┘
 ```
 
-## 🛠️ Technologies utilisées
+### Flux de données – Ajout d'un client
 
-- **Flutter** – Framework UI multiplateforme
-- **Dart** – Langage de programmation
-- **Provider** – Gestion d'état scalable (`ChangeNotifier`)
-- **TDD** – Test-Driven Development (tests unitaires & widget tests)
+```
+User taps "Add"
+      │
+      ▼
+QueueProvider.addClient(name)
+      │
+      ├─► GeolocationService.getCurrentPosition()
+      │         │
+      │         ├─► getLastKnownPosition()       ← rapide (cache)
+      │         └─► getCurrentPosition(high)     ← fallback GPS
+      │
+      ├─► LocalQueueService.insertClientLocally(...)   ← SQLite
+      │
+      ├─► notifyListeners()    ← UI rafraîchie immédiatement
+      │
+      └─► _syncLocalToRemote() ← unawaited, async vers Supabase
+```
 
-## 📁 Structure du projet
+---
+
+## Technologies utilisées
+
+| Package | Version | Usage |
+|---------|---------|-------|
+| `flutter` | SDK | Framework UI |
+| `provider` | ^6.0.0 | Gestion d'état (`ChangeNotifier`) |
+| `geolocator` | ^11.0.0 | Récupération de la position GPS |
+| `sqflite` | ^2.3.0 | Base de données locale SQLite |
+| `supabase_flutter` | ^2.7.0 | Backend temps réel + auth anonyme |
+| `connectivity_plus` | ^6.0.0 | Détection de la connectivité réseau |
+| `flutter_dotenv` | ^5.1.0 | Variables d'environnement (`.env`) |
+| `uuid` | ^4.0.0 | Génération d'identifiants uniques |
+| `path_provider` | ^2.1.1 | Chemin vers le répertoire SQLite |
+
+---
+
+## Structure du projet
 
 ```
 waiting_room_app/
-├── docs/                              # Documentation du projet
-│   ├── Compte_rendu_Workshop3.pdf     ← Trace d'exécution Workshop 3
-│   └── Prompts_Workshop3.pdf          ← Prompts et résumé des étapes
-├── lib/                               # Code source Dart
-│   ├── main.dart                      # UI avec Provider (StatelessWidget)
-│   └── queue_provider.dart            # QueueProvider (ChangeNotifier)
-├── test/                              # Tests
-│   ├── waiting_room_manager_test.dart # Tests unitaires
-│   └── waiting_room_widget_test.dart  # Tests widget
-├── android/                           # Configuration Android
-├── ios/                               # Configuration iOS
-├── web/                               # Configuration Web
-├── pubspec.yaml                       # Dépendances Flutter
-└── README.md                          # Ce fichier
+├── android/
+│   └── app/
+│       ├── build.gradle.kts          # minSdk = 21 (requis par geolocator)
+│       └── src/main/
+│           └── AndroidManifest.xml   # Permissions GPS + FOREGROUND_SERVICE
+├── lib/
+│   ├── main.dart                     # Init Supabase + Provider
+│   ├── waiting_room_app.dart         # UI principale (WaitingRoomApp + Page)
+│   ├── queue_provider.dart           # Gestionnaire d'état (ChangeNotifier)
+│   ├── geolocation_service.dart      # Service GPS robuste (multi-stratégie)
+│   ├── local_queue_service.dart      # Couche d'accès SQLite
+│   └── models/
+│       └── client.dart               # Modèle Client (id, name, lat, lng, ...)
+├── test/
+│   ├── client_test.dart              # Tests unitaires du modèle Client
+│   └── local_queue_service_test.dart # Tests SQLite (base in-memory)
+├── docs/                             # Documentation complémentaire
+├── pubspec.yaml                      # Dépendances et assets
+├── .env                              # Variables Supabase (non versionné)
+└── README.md                         # Ce fichier
 ```
 
-## 🧪 Lancer les tests
+---
+
+## Installation et configuration
+
+### 1. Prérequis
+
+- **Flutter SDK** ≥ 3.10 ([flutter.dev](https://flutter.dev))
+- **Android Studio** avec un émulateur API 21+ (ou appareil physique)
+- Un projet **Supabase** avec la table `clients`
+
+### 2. Cloner le dépôt
 
 ```bash
-# Tests unitaires uniquement
-flutter test test/waiting_room_manager_test.dart
-
-# Tous les tests
-flutter test
+git clone https://github.com/AmenallahBensalem/TP5_flutter.git
+cd TP5_flutter
 ```
 
-## 📚 Ressources Flutter
+### 3. Configurer Supabase
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
-- [Documentation officielle Flutter](https://docs.flutter.dev/)
-- [Package Provider](https://pub.dev/packages/provider)
+Créer un fichier `.env` à la racine du projet :
+
+```env
+SUPABASE_URL=https://xxxxxxxxxxxxxxxxxxxx.supabase.co
+SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+#### Schéma de la table Supabase
+
+```sql
+CREATE TABLE clients (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  lat        DOUBLE PRECISION,
+  lng        DOUBLE PRECISION,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Activer Row Level Security
+ALTER TABLE clients ENABLE ROW LEVEL SECURITY;
+
+-- Politique pour les utilisateurs anonymes
+CREATE POLICY "anon_all" ON clients
+  FOR ALL TO anon USING (true) WITH CHECK (true);
+```
+
+### 4. Installer les dépendances et lancer
+
+```bash
+flutter pub get
+flutter run
+```
+
+---
+
+## Configuration de l'émulateur Android
+
+Le GPS **ne fonctionne pas automatiquement** sur l'émulateur. Il faut injecter une position manuellement.
+
+### Étapes obligatoires
+
+1. Lancer l'émulateur depuis Android Studio
+2. Cliquer sur **`⋮`** (Extended Controls)
+3. Aller dans l'onglet **`Location`**
+4. Saisir les coordonnées de test :
+   - **Latitude** : `36.4510`
+   - **Longitude** : `10.7350`
+5. Cocher **`Enable GPS signal`** ✅
+6. Cliquer sur **`Set Location`**
+7. Lancer : `flutter run`
+
+### Pourquoi `LocationAccuracy.high` ?
+
+| Précision | Provider utilisé | Fonctionne sur émulateur |
+|-----------|-----------------|--------------------------|
+| `medium` | Network (WiFi/Cell) | ❌ Non (pas de vraie antenne) |
+| `high` | GPS satellitaire | ✅ Oui (avec signal injecté) |
+
+### Permissions AndroidManifest.xml
+
+```xml
+<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+<!-- Obligatoire depuis Android 9 (API 28) -->
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+```
+
+> ⚠️ **Sans `FOREGROUND_SERVICE`**, Geolocator produit un **timeout silencieux** sur Android 9+.
+
+---
+
+## Lancer les tests
+
+```bash
+# Tous les tests
+flutter test
+
+# Tests du modèle Client
+flutter test test/client_test.dart
+
+# Tests de la couche SQLite
+flutter test test/local_queue_service_test.dart
+
+# Analyse statique
+flutter analyze
+```
+
+---
+
+## Logs attendus
+
+### ✅ GPS disponible (position en cache)
+
+```
+GEO: Service GPS activé = true
+GEO: Permission initiale = LocationPermission.whileInUse
+GEO: Permission OK (...). Récupération de la position...
+GEO: Dernière position connue utilisée : lat=36.451, lng=10.7349983, précision=5.0m
+Position reçue : 36.451, 10.7349983
+ADD: Client saved locally: <nom>
+```
+
+### ✅ GPS fix frais
+
+```
+GEO: Aucune dernière position connue disponible.
+GEO: Tentative getCurrentPosition (GPS provider, accuracy=high)...
+GEO: Position obtenue : lat=36.451, lng=10.735, précision=5.0m, altitude=0.0m
+```
+
+### ⚠️ GPS désactivé
+
+```
+GEO: Service GPS activé = false
+GEO ERROR: GPS désactivé. Activer les services de localisation.
+```
+
+### ⚠️ Timeout (signal GPS non injecté)
+
+```
+GEO ERROR: Timeout — le GPS provider n'a pas répondu en 30s.
+Sur émulateur : s'assurer que le signal GPS est injecté via
+  Extended Controls > Location > Set Location (lat=36.4510, lng=10.7350)
+```
+
+---
+
+## Documentation du code
+
+Chaque fichier Dart est documenté avec des commentaires **dartdoc** (`///`).
+
+| Fichier | Contenu documenté |
+|---------|-------------------|
+| [`lib/models/client.dart`](lib/models/client.dart) | Modèle `Client` – champs, `fromMap`, `toMap` |
+| [`lib/local_queue_service.dart`](lib/local_queue_service.dart) | Service SQLite – toutes les méthodes CRUD |
+| [`lib/geolocation_service.dart`](lib/geolocation_service.dart) | Service GPS – stratégie multi-étapes |
+| [`lib/queue_provider.dart`](lib/queue_provider.dart) | `QueueProvider` – cycle de vie, sync, FIFO |
+| [`lib/main.dart`](lib/main.dart) | Initialisation Supabase + Provider |
+| [`lib/waiting_room_app.dart`](lib/waiting_room_app.dart) | Widgets UI – `WaitingRoomApp`, `WaitingRoomPage` |
+
+---
 
 ## 👤 Auteur
 
 **Amenallah Bensalem** – [GitHub](https://github.com/AmenallahBensalem)
+
+Workshop 5 Flutter — Géolocalisation GPS + SQLite offline-first + Supabase temps réel

@@ -7,18 +7,53 @@ import 'geolocation_service.dart';
 import 'local_queue_service.dart';
 import 'models/client.dart';
 
+/// Gestionnaire d'état principal de l'application (pattern Provider).
+///
+/// [QueueProvider] est un [ChangeNotifier] qui orchestre :
+/// - La **persistance locale** (SQLite via [LocalQueueService]) – offline-first
+/// - La **géolocalisation GPS** (via [GeolocationService])
+/// - La **synchronisation Supabase** (upsert + écoute temps réel)
+/// - La **détection réseau** (connectivity_plus) pour déclencher la sync
+///   automatiquement au retour de la connexion
+///
+/// ### Cycle de vie
+/// ```dart
+/// // Dans main.dart
+/// ChangeNotifierProvider(
+///   create: (_) => QueueProvider()..initialize(),
+///   child: const WaitingRoomApp(),
+/// )
+/// ```
+///
+/// ### Architecture de synchronisation
+/// ```
+/// UI ──► addClient() ──► SQLite (immédiat) ──► notifyListeners()
+///                    └──► _syncLocalToRemote() (unawaited, arrière-plan)
+///                              │
+///                    Supabase.upsert() ──► markClientAsSynced()
+/// ```
+///
+/// ### Résistance aux pannes réseau
+/// Les clients créés hors ligne sont marqués `is_synced = 0` et re-synchronisés
+/// dès que [Connectivity.onConnectivityChanged] signale un retour en ligne.
 class QueueProvider extends ChangeNotifier {
   final SupabaseClient _supabase;
   final LocalQueueService _localDb;
   final GeolocationService _geoService;
 
   List<Client> _clients = [];
+
+  /// Liste ordonnée (croissant par `created_at`) des clients en file d'attente.
   List<Client> get clients => _clients;
 
   StreamSubscription<List<Map<String, dynamic>>>? _sub;
   StreamSubscription<List<ConnectivityResult>>? _connSub;
   bool _syncing = false;
 
+  /// Crée un [QueueProvider] avec des dépendances injectables (facilitant les tests).
+  ///
+  /// En production, les valeurs par défaut utilisent les singletons Supabase.
+  /// En test, on peut passer des mocks pour [supabase], [localDb] et [geoService].
   QueueProvider({
     SupabaseClient? supabase,
     LocalQueueService? localDb,
@@ -27,7 +62,10 @@ class QueueProvider extends ChangeNotifier {
         _localDb = localDb ?? LocalQueueService(),
         _geoService = geoService ?? GeolocationService();
 
-  /// À appeler une fois au démarrage (voir main.dart)
+  /// Initialise le provider : charge les données locales, démarre l'écoute
+  /// Supabase et lance une première synchronisation.
+  ///
+  /// À appeler une fois après la création (voir `main.dart`).
   Future<void> initialize() async {
     await _reloadFromLocal();
     _listen();
@@ -39,6 +77,7 @@ class QueueProvider extends ChangeNotifier {
     await _syncLocalToRemote();
   }
 
+  /// Recharge la liste des clients depuis SQLite et notifie l'UI.
   Future<void> _reloadFromLocal() async {
     final rows = await _localDb.getClients();
     _clients = rows.map(Client.fromMap).toList()
@@ -46,7 +85,12 @@ class QueueProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  // Temps réel : Supabase -> base locale -> UI
+  /// Écoute le stream Supabase en temps réel et maintient la base locale à jour.
+  ///
+  /// Flux de traitement :
+  /// 1. Insère / met à jour en local chaque ligne reçue de Supabase
+  /// 2. Supprime en local les clients synchronisés qui ont disparu à distance
+  /// 3. Recharge et notifie l'UI
   void _listen() {
     _sub = _supabase
         .from('clients')
@@ -80,7 +124,11 @@ class QueueProvider extends ChangeNotifier {
     );
   }
 
-  // Local -> Supabase
+  /// Synchronise les clients non synchronisés (is_synced = 0) vers Supabase.
+  ///
+  /// - Utilise un verrou [_syncing] pour éviter les appels concurrents.
+  /// - En cas d'échec d'un client individuel, continue avec les suivants.
+  /// - Appelé automatiquement après [addClient] et au retour en ligne.
   Future<void> _syncLocalToRemote() async {
     if (_syncing) return;
     _syncing = true;
@@ -102,24 +150,62 @@ class QueueProvider extends ChangeNotifier {
     }
   }
 
+  /// Ajoute un nouveau client à la file d'attente.
+  ///
+  /// Étapes :
+  /// 1. Récupère la position GPS via [GeolocationService] (peut retourner `null`)
+  /// 2. Génère un UUID v4 et insère le client en SQLite avec `is_synced = 0`
+  /// 3. Notifie l'UI immédiatement ([_reloadFromLocal])
+  /// 4. Lance la synchronisation Supabase en arrière-plan (non bloquant)
+  ///
+  /// Lance une exception si l'insertion locale échoue.
+  /// Un [name] vide ou composé uniquement d'espaces est ignoré.
   Future<void> addClient(String name) async {
-    if (name.trim().isEmpty) return;
+    final trimmedName = name.trim();
+    if (trimmedName.isEmpty) return;
 
-    final position = await _geoService.getCurrentPosition();
+    try {
+      debugPrint('ADD: Getting location...');
 
-    await _localDb.insertClientLocally({
-      'id': const Uuid().v4(),
-      'name': name.trim(),
-      'lat': position?.latitude,
-      'lng': position?.longitude,
-      'created_at': DateTime.now().toUtc().toIso8601String(),
-      'is_synced': 0,
-    });
+      final position = await _geoService.getCurrentPosition();
+      if (position == null) {
+        debugPrint('ATTENTION : position GPS introuvable.');
+      } else {
+        debugPrint(
+          'Position reçue : ${position.latitude}, ${position.longitude}',
+        );
+      }
+      debugPrint('ADD: Saving client locally...');
 
-    await _reloadFromLocal(); // l'UI se met à jour tout de suite
-    unawaited(_syncLocalToRemote());
+      final id = const Uuid().v4();
+
+      await _localDb.insertClientLocally({
+        'id': id,
+        'name': trimmedName,
+        'lat': position?.latitude,
+        'lng': position?.longitude,
+        'created_at': DateTime.now().toUtc().toIso8601String(),
+        'is_synced': 0,
+      });
+
+      debugPrint('ADD: Client saved locally: $trimmedName');
+
+      await _reloadFromLocal();
+
+      debugPrint('ADD: UI refreshed. Starting Supabase sync.');
+
+      unawaited(_syncLocalToRemote());
+    } catch (e, stackTrace) {
+      debugPrint('ADD FAILED: $e');
+      debugPrintStack(stackTrace: stackTrace);
+      rethrow;
+    }
   }
 
+  /// Supprime un client par son [id] localement et dans Supabase.
+  ///
+  /// La suppression locale est immédiate ; la suppression distante peut
+  /// échouer silencieusement (mode hors ligne) sans bloquer l'UI.
   Future<void> removeClient(String id) async {
     await _localDb.deleteClient(id);
     await _reloadFromLocal();
@@ -130,6 +216,9 @@ class QueueProvider extends ChangeNotifier {
     }
   }
 
+  /// Retire le premier client de la file (FIFO).
+  ///
+  /// Sans effet si la file est vide.
   Future<void> nextClient() async {
     if (_clients.isEmpty) return;
     await removeClient(_clients.first.id);
