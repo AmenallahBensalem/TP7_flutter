@@ -1,8 +1,11 @@
+
 import 'dart:async';
+
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
+
 import 'geolocation_service.dart';
 import 'local_queue_service.dart';
 import 'models/client.dart';
@@ -13,27 +16,34 @@ import 'services/sync_service.dart';
 
 /// Gestionnaire d'état de la file d'attente (offline-first).
 ///
-/// - Source de vérité d'affichage : SQLite ([LocalQueueService]).
-/// - Synchronisation vers Supabase via [SyncService] / [QueueRepository].
-/// - Pagination de l'affichage local par pages de [pageSize] clients.
+/// - Source de vérité : SQLite (LocalQueueService).
+/// - Synchronisation Supabase via SyncService.
+/// - Realtime avec gestion du rafraîchissement du token.
+/// - Pagination locale par pages de 20 clients.
 class QueueProvider extends ChangeNotifier {
   final SupabaseClient _supabase;
   final LocalQueueService _localDb;
   final GeolocationService _geoService;
+
   late final QueueRepository _repository;
   late final SyncService _syncService;
 
-  /// Taille d'une page d'affichage.
   static const int pageSize = 20;
 
   final List<Client> _allClients = [];
+
   int _visibleCount = pageSize;
+
   QueueState _state = QueueState.initial;
   String? _errorMessage;
   bool _isLoadingMore = false;
+  bool _disposed = false;
 
   StreamSubscription<List<Map<String, dynamic>>>? _sub;
   StreamSubscription<List<ConnectivityResult>>? _connSub;
+
+  // Abonnement aux changements d'authentification Supabase.
+  StreamSubscription<AuthState>? _authSub;
 
   QueueProvider({
     SupabaseClient? supabase,
@@ -46,136 +56,296 @@ class QueueProvider extends ChangeNotifier {
     _syncService = SyncService(_localDb, _repository);
   }
 
-  // ── Getters ──────────────────────────────────────────────────────────
+  // ── Getters ──────────────────────────────────────────
 
-  /// Seulement la partie visible de la file (pagination de l'affichage).
   List<Client> get clients =>
       List.unmodifiable(_allClients.take(_visibleCount));
 
   QueueState get state => _state;
   String? get errorMessage => _errorMessage;
+
   bool get hasMore => _visibleCount < _allClients.length;
   bool get isLoadingMore => _isLoadingMore;
   int get totalCount => _allClients.length;
 
-  // ── Cycle de vie ─────────────────────────────────────────────────────
-
-  Future<void> initialize() async {
-    // Évite les abonnements en double (ex. bouton « Retry »).
-    await _sub?.cancel();
-    await _connSub?.cancel();
-
-    _errorMessage = null;
-    _state = QueueState.loading;
-    notifyListeners();
-
-    try {
-      await _reloadFromLocal();
-      _listen();
-      _connSub = Connectivity().onConnectivityChanged.listen((results) {
-        if (!results.contains(ConnectivityResult.none)) {
-          _syncLocalToRemote();
-        }
-      });
-      await _syncLocalToRemote();
-    } catch (e) {
-      debugPrint('Initialize failed: $e');
-      _errorMessage = 'Failed to load queue';
-      _state = QueueState.error;
+  void _notify() {
+    if (!_disposed) {
       notifyListeners();
     }
   }
 
-  /// Pull-to-refresh : resynchronise puis recharge.
-  Future<void> refresh() async {
-    _state = QueueState.refreshing;
-    notifyListeners();
-    await _syncLocalToRemote();
+  // ── Initialisation ───────────────────────────────────
+
+  Future<void> initialize() async {
+    // Éviter les abonnements en double.
+    await _sub?.cancel();
+    await _connSub?.cancel();
+    await _authSub?.cancel();
+
+    if (_disposed) return;
+
+    _errorMessage = null;
+    _state = QueueState.loading;
+    _notify();
+
+    try {
+      // 1. Charger les données SQLite.
+      await _reloadFromLocal();
+
+      if (_disposed) return;
+
+      // 2. Écouter les changements d'authentification.
+      _authSub = _supabase.auth.onAuthStateChange.listen(
+        (data) {
+          if (data.event == AuthChangeEvent.tokenRefreshed ||
+              data.event == AuthChangeEvent.signedIn) {
+            debugPrint(
+              'Supabase authentication updated: ${data.event}',
+            );
+
+            // Redémarrer Realtime avec la session actualisée.
+            unawaited(_restartRealtime());
+          }
+        },
+        onError: (Object error) {
+          debugPrint('Authentication stream error: $error');
+        },
+      );
+
+      // 3. Démarrer Realtime si une session existe.
+      if (_supabase.auth.currentSession != null) {
+        _listen();
+      } else {
+        debugPrint(
+          'Realtime waiting for Supabase authentication.',
+        );
+      }
+
+      // 4. Écouter le retour de la connexion Internet.
+      _connSub = Connectivity().onConnectivityChanged.listen(
+        (results) {
+          if (!results.contains(ConnectivityResult.none)) {
+            debugPrint('Network available: syncing queue.');
+            unawaited(_syncLocalToRemote());
+          }
+        },
+        onError: (Object error) {
+          debugPrint('Connectivity error: $error');
+        },
+      );
+
+      // 5. Synchroniser les données.
+      await _syncLocalToRemote();
+    } catch (e) {
+      debugPrint('Initialize failed: $e');
+
+      if (_disposed) return;
+
+      _errorMessage = 'Failed to load queue';
+      _state = QueueState.error;
+      _notify();
+    }
   }
 
-  // ── Données locales ──────────────────────────────────────────────────
+  // ── Rafraîchissement manuel ─────────────────────────
+
+  Future<void> refresh() async {
+    if (_disposed) return;
+
+    _state = QueueState.refreshing;
+    _notify();
+
+    try {
+      await _syncLocalToRemote();
+    } catch (e) {
+      debugPrint('Refresh failed: $e');
+
+      if (_disposed) return;
+
+      _errorMessage = 'Failed to refresh queue';
+      _state = QueueState.error;
+      _notify();
+    }
+  }
+
+  // ── SQLite ───────────────────────────────────────────
 
   Future<void> _reloadFromLocal() async {
     final rows = await _localDb.getClients();
+
+    if (_disposed) return;
+
     final loaded = rows.map(Client.fromLocalMap).toList()
       ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
 
     _allClients
       ..clear()
       ..addAll(loaded);
-    _state = _allClients.isEmpty ? QueueState.empty : QueueState.loaded;
-    notifyListeners();
+
+    _state = _allClients.isEmpty
+        ? QueueState.empty
+        : QueueState.loaded;
+
+    _notify();
   }
 
-  // ── Realtime ─────────────────────────────────────────────────────────
+  // ── Supabase Realtime ────────────────────────────────
 
-  /// Réconcilie la base locale avec Supabase (sans doublons : la clé
-  /// primaire `id` + ConflictAlgorithm.replace font un upsert).
   void _listen() {
+    if (_disposed) return;
+
+    if (_supabase.auth.currentSession == null) {
+      debugPrint('Realtime skipped: no active session.');
+      return;
+    }
+
     _sub = _supabase
         .from('clients')
         .stream(primaryKey: ['id'])
         .order('created_at', ascending: true)
         .listen(
       (rows) async {
-        final remoteIds = rows.map((r) => r['id'].toString()).toSet();
+        try {
+          if (_disposed) return;
 
-        for (final row in rows) {
-          final remote = Client.fromSupabaseMap(row);
-          await _localDb.insertClientLocally(remote.toLocalMap());
-        }
+          final remoteIds =
+              rows.map((r) => r['id'].toString()).toSet();
 
-        // Supprimer en local les clients synchronisés disparus à distance
-        final local = await _localDb.getClients();
-        for (final c in local.map(Client.fromLocalMap)) {
-          if (c.isSynced && !remoteIds.contains(c.id)) {
-            await _localDb.deleteClient(c.id);
+          // Enregistrer les données distantes dans SQLite.
+          for (final row in rows) {
+            final remote = Client.fromSupabaseMap(row);
+
+            await _localDb.insertClientLocally(
+              remote.toLocalMap(),
+            );
           }
+
+          // Supprimer les clients synchronisés
+          // qui ont disparu du serveur.
+          final local = await _localDb.getClients();
+
+          for (final c in local.map(Client.fromLocalMap)) {
+            if (c.isSynced && !remoteIds.contains(c.id)) {
+              await _localDb.deleteClient(c.id);
+            }
+          }
+
+          await _reloadFromLocal();
+        } catch (e) {
+          debugPrint('Realtime processing error: $e');
         }
-        await _reloadFromLocal();
       },
-      onError: (e) => debugPrint('Stream error: $e'),
+      onError: (Object error) {
+        debugPrint('Stream error: $error');
+
+        // La reconnexion sera déclenchée lors
+        // du prochain changement d'authentification.
+      },
     );
   }
 
-  /// Insertion Realtime sans doublon (par `id`).
-  void handleRealtimeInsert(Client client) {
-    if (_allClients.any((c) => c.id == client.id)) return;
-    _allClients.add(client);
-    _allClients.sort((a, b) => a.createdAt.compareTo(b.createdAt));
-    if (_state == QueueState.empty) _state = QueueState.loaded;
-    notifyListeners();
+  // ── Redémarrage Realtime ─────────────────────────────
+
+  Future<void> _restartRealtime() async {
+    if (_disposed) return;
+
+    debugPrint('Restarting Supabase Realtime...');
+
+    // Fermer l'ancien abonnement.
+    await _sub?.cancel();
+    _sub = null;
+
+    if (_disposed) return;
+
+    // Relancer uniquement avec une session valide.
+    if (_supabase.auth.currentSession != null) {
+      _listen();
+      debugPrint('Realtime listener restarted.');
+    }
   }
 
-  // ── Synchronisation ──────────────────────────────────────────────────
+  // ── Insertion Realtime ───────────────────────────────
+
+  void handleRealtimeInsert(Client client) {
+    if (_disposed) return;
+
+    if (_allClients.any((c) => c.id == client.id)) {
+      return;
+    }
+
+    _allClients.add(client);
+
+    _allClients.sort(
+      (a, b) => a.createdAt.compareTo(b.createdAt),
+    );
+
+    if (_state == QueueState.empty) {
+      _state = QueueState.loaded;
+    }
+
+    _notify();
+  }
+
+  // ── Synchronisation ──────────────────────────────────
 
   Future<void> _syncLocalToRemote() async {
-    await _syncService.synchronize();
-    await _reloadFromLocal();
+    if (_disposed) return;
+
+    try {
+      await _syncService.synchronize();
+
+      if (_disposed) return;
+
+      await _reloadFromLocal();
+    } catch (e) {
+      debugPrint('Synchronization failed: $e');
+
+      // Ne pas supprimer les données locales.
+      // Elles seront synchronisées ultérieurement.
+      if (!_disposed) {
+        await _reloadFromLocal();
+      }
+    }
   }
 
-  // ── Pagination ───────────────────────────────────────────────────────
+  // ── Pagination ───────────────────────────────────────
 
-  /// Affiche la page suivante (la source locale contient déjà tout).
   Future<void> loadMore() async {
-    if (_isLoadingMore || !hasMore) return;
+    if (_disposed || _isLoadingMore || !hasMore) return;
+
     _isLoadingMore = true;
-    notifyListeners();
+    _notify();
 
-    await Future<void>.delayed(const Duration(milliseconds: 150));
+    await Future<void>.delayed(
+      const Duration(milliseconds: 150),
+    );
+
+    if (_disposed) return;
+
     _visibleCount += pageSize;
-
     _isLoadingMore = false;
-    notifyListeners();
+
+    _notify();
   }
 
-  // ── Actions ──────────────────────────────────────────────────────────
+  // ── Ajouter un client ────────────────────────────────
 
   Future<void> addClient(String name) async {
-    final trimmedName = name.trim();
-    if (trimmedName.isEmpty) return;
+  debugPrint('ADD STEP 1: Button clicked');
+
+  final trimmedName = name.trim();
+
+  if (trimmedName.isEmpty) {
+    debugPrint('ADD ERROR: Empty name');
+    return;
+  }
+
+  try {
+    debugPrint('ADD STEP 2: Getting GPS');
 
     final position = await _geoService.getCurrentPosition();
+
+    debugPrint('ADD STEP 3: GPS completed');
 
     final client = Client(
       id: const Uuid().v4(),
@@ -187,34 +357,71 @@ class QueueProvider extends ChangeNotifier {
       syncStatus: SyncStatus.pending,
     );
 
-    await _localDb.insertClientLocally(client.toLocalMap());
+    debugPrint('ADD STEP 4: Saving to SQLite');
+
+    await _localDb.insertClientLocally(
+      client.toLocalMap(),
+    );
+
+    debugPrint('ADD STEP 5: SQLite insertion successful');
+
     await _reloadFromLocal();
-    unawaited(_syncLocalToRemote());
+
+    debugPrint('ADD STEP 6: Local list refreshed');
+
+    await _syncLocalToRemote();
+
+    debugPrint('ADD STEP 7: Sync attempt completed');
+  } catch (e, stackTrace) {
+    debugPrint('ADD ERROR: $e');
+    debugPrintStack(stackTrace: stackTrace);
+    rethrow;
   }
+}
+
+  // ── Supprimer un client ──────────────────────────────
 
   Future<void> removeClient(String id) async {
-    // Retrait immédiat de la liste en mémoire (requis par Dismissible).
-    _allClients.removeWhere((c) => c.id == id);
-    if (_allClients.isEmpty) _state = QueueState.empty;
-    notifyListeners();
+    if (_disposed) return;
 
+    // Suppression immédiate de l'affichage.
+    _allClients.removeWhere((c) => c.id == id);
+
+    if (_allClients.isEmpty) {
+      _state = QueueState.empty;
+    }
+
+    _notify();
+
+    // Suppression SQLite.
     await _localDb.deleteClient(id);
+
+    // Suppression distante.
     try {
       await _repository.deleteOnServer(id);
     } catch (e) {
-      debugPrint('Remove failed (offline ?): $e');
+      debugPrint('Remove failed (offline?): $e');
     }
   }
 
+  // ── Client suivant ───────────────────────────────────
+
   Future<void> nextClient() async {
-    if (_allClients.isEmpty) return;
+    if (_allClients.isEmpty || _disposed) return;
+
     await removeClient(_allClients.first.id);
   }
 
+  // ── Libération des ressources ────────────────────────
+
   @override
   void dispose() {
+    _disposed = true;
+
     _sub?.cancel();
     _connSub?.cancel();
+    _authSub?.cancel();
+
     super.dispose();
   }
 }

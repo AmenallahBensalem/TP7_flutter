@@ -2,6 +2,7 @@ import '../local_queue_service.dart';
 import '../models/client.dart';
 import '../models/sync_status.dart';
 import '../repositories/queue_repository.dart';
+import 'package:flutter/foundation.dart';
 
 /// Envoie les clients locaux non synchronisés vers Supabase.
 class SyncService {
@@ -30,8 +31,17 @@ class SyncService {
           await _repository.registerOnServer(client);
           await _storage.updateSyncStatus(id, SyncStatus.synced);
           successCount++;
-        } catch (_) {
-          await _storage.updateSyncStatus(id, SyncStatus.failed);
+        } catch (e, stackTrace) {
+          debugPrint('========== SUPABASE SYNC ERROR ==========');
+          debugPrint('Client ID: $id');
+          debugPrint('Erreur: $e');
+          debugPrintStack(stackTrace: stackTrace);
+          debugPrint('=========================================');
+
+          await _storage.updateSyncStatus(
+            id,
+            SyncStatus.failed,
+          );
         }
       }
     } finally {
