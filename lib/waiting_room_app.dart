@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'models/queue_state.dart';
 import 'providers/connectivity_provider.dart';
 import 'queue_provider.dart';
 import 'widgets/client_card.dart';
+import 'widgets/loading_widget.dart';
 import 'widgets/offline_banner.dart';
+import 'widgets/queue_empty_widget.dart';
 
 /// Widget racine de l'application Waiting Room.
 ///
@@ -26,11 +29,13 @@ class WaitingRoomApp extends StatelessWidget {
 ///
 /// Permet à l'utilisateur de :
 /// - **Ajouter** un client (champ texte + bouton « Add »)
-/// - **Voir** la liste ordonnée des clients avec leur date d'inscription
-/// - **Supprimer** un client individuel (icône poubelle)
-/// - **Passer au suivant** (bouton « Next Client » – supprime le premier de la file)
+/// - **Voir** la liste paginée des clients (états : chargement, vide,
+///   erreur, liste)
+/// - **Supprimer** un client (glisser vers la gauche)
+/// - **Rafraîchir** (pull-to-refresh)
+/// - **Passer au suivant** (bouton « Next Client »)
 ///
-/// Affiche une [OfflineBanner] en haut de l'écran selon l'état de la connexion.
+/// Affiche une [OfflineBanner] en haut selon l'état de la connexion.
 class WaitingRoomPage extends StatefulWidget {
   const WaitingRoomPage({super.key});
   @override
@@ -41,8 +46,6 @@ class _WaitingRoomPageState extends State<WaitingRoomPage> {
   final _controller = TextEditingController();
 
   /// Lit le nom saisi, appelle [QueueProvider.addClient] et gère les erreurs.
-  ///
-  /// Affiche un [SnackBar] si le champ est vide ou si l'ajout échoue.
   Future<void> _add() async {
     final name = _controller.text.trim();
 
@@ -73,6 +76,73 @@ class _WaitingRoomPageState extends State<WaitingRoomPage> {
   void dispose() {
     _controller.dispose();
     super.dispose();
+  }
+
+  /// Corps de la liste selon l'état de [QueueProvider].
+  Widget _buildQueue(QueueProvider provider) {
+    switch (provider.state) {
+      case QueueState.initial:
+      case QueueState.loading:
+        return const LoadingWidget(message: 'Loading queue...');
+
+      case QueueState.error:
+        return Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(provider.errorMessage ?? 'Something went wrong'),
+              const SizedBox(height: 12),
+              ElevatedButton(
+                onPressed: provider.initialize,
+                child: const Text('Retry'),
+              ),
+            ],
+          ),
+        );
+
+      case QueueState.empty:
+        return const QueueEmptyWidget();
+
+      case QueueState.loaded:
+      case QueueState.refreshing:
+      case QueueState.loadingMore:
+        return NotificationListener<ScrollNotification>(
+          onNotification: (n) {
+            if (n.metrics.pixels >= n.metrics.maxScrollExtent - 200) {
+              provider.loadMore();
+            }
+            return false;
+          },
+          child: RefreshIndicator(
+            onRefresh: provider.refresh,
+            child: ListView.builder(
+              physics: const AlwaysScrollableScrollPhysics(),
+              itemCount: provider.clients.length + (provider.hasMore ? 1 : 0),
+              itemBuilder: (context, i) {
+                if (i >= provider.clients.length) {
+                  return const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Center(child: CircularProgressIndicator()),
+                  );
+                }
+                final c = provider.clients[i];
+                return Dismissible(
+                  key: ValueKey(c.id),
+                  direction: DismissDirection.endToStart,
+                  background: Container(
+                    color: Colors.red,
+                    alignment: Alignment.centerRight,
+                    padding: const EdgeInsets.only(right: 16),
+                    child: const Icon(Icons.delete, color: Colors.white),
+                  ),
+                  onDismissed: (_) => provider.removeClient(c.id),
+                  child: ClientCard(client: c),
+                );
+              },
+            ),
+          ),
+        );
+    }
   }
 
   @override
@@ -107,31 +177,7 @@ class _WaitingRoomPageState extends State<WaitingRoomPage> {
                   const SizedBox(height: 20),
                   Expanded(
                     child: Consumer<QueueProvider>(
-                      builder: (context, provider, _) {
-                        if (provider.clients.isEmpty) {
-                          return const Center(
-                              child: Text('No one in queue yet...'));
-                        }
-                        return ListView.builder(
-                          itemCount: provider.clients.length,
-                          itemBuilder: (context, i) {
-                            final c = provider.clients[i];
-                            return Dismissible(
-                              key: ValueKey(c.id),
-                              direction: DismissDirection.endToStart,
-                              background: Container(
-                                color: Colors.red,
-                                alignment: Alignment.centerRight,
-                                padding: const EdgeInsets.only(right: 16),
-                                child: const Icon(Icons.delete,
-                                    color: Colors.white),
-                              ),
-                              onDismissed: (_) => provider.removeClient(c.id),
-                              child: ClientCard(client: c),
-                            );
-                          },
-                        );
-                      },
+                      builder: (context, provider, _) => _buildQueue(provider),
                     ),
                   ),
                   const SizedBox(height: 20),
