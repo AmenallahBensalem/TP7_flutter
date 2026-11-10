@@ -7,19 +7,23 @@ import 'geolocation_service.dart';
 import 'local_queue_service.dart';
 import 'models/client.dart';
 import 'models/sync_status.dart';
+import 'repositories/queue_repository.dart';
+import 'services/sync_service.dart';
 
 /// Gestionnaire d'état de la file d'attente (offline-first).
 class QueueProvider extends ChangeNotifier {
   final SupabaseClient _supabase;
   final LocalQueueService _localDb;
   final GeolocationService _geoService;
+  late final QueueRepository _repository;
+  late final SyncService _syncService;
 
   List<Client> _clients = [];
   List<Client> get clients => _clients;
 
   StreamSubscription<List<Map<String, dynamic>>>? _sub;
   StreamSubscription<List<ConnectivityResult>>? _connSub;
-  bool _syncing = false;
+  
 
   QueueProvider({
     SupabaseClient? supabase,
@@ -27,8 +31,10 @@ class QueueProvider extends ChangeNotifier {
     GeolocationService? geoService,
   })  : _supabase = supabase ?? Supabase.instance.client,
         _localDb = localDb ?? LocalQueueService(),
-        _geoService = geoService ?? GeolocationService();
-
+        _geoService = geoService ?? GeolocationService() {
+    _repository = QueueRepository(_supabase, _localDb);
+    _syncService = SyncService(_localDb, _repository);
+  }
   Future<void> initialize() async {
     await _reloadFromLocal();
     _listen();
@@ -77,25 +83,8 @@ class QueueProvider extends ChangeNotifier {
   }
 
   Future<void> _syncLocalToRemote() async {
-    if (_syncing) return;
-    _syncing = true;
-    try {
-      final records = await _localDb.getUnsyncedClients();
-      for (final record in records) {
-        final client = Client.fromLocalMap(record);
-        try {
-          await _localDb.updateSyncStatus(client.id, SyncStatus.syncing);
-          await _supabase.from('clients').upsert(client.toSupabaseMap());
-          await _localDb.updateSyncStatus(client.id, SyncStatus.synced);
-        } catch (e) {
-          debugPrint('Sync failed for ${client.id}: $e');
-          await _localDb.updateSyncStatus(client.id, SyncStatus.failed);
-        }
-      }
-      await _reloadFromLocal();
-    } finally {
-      _syncing = false;
-    }
+    await _syncService.synchronize();
+    await _reloadFromLocal();
   }
 
   Future<void> addClient(String name) async {
@@ -123,7 +112,7 @@ class QueueProvider extends ChangeNotifier {
     await _localDb.deleteClient(id);
     await _reloadFromLocal();
     try {
-      await _supabase.from('clients').delete().eq('id', id);
+      await _repository.deleteOnServer(id);
     } catch (e) {
       debugPrint('Remove failed (offline ?): $e');
     }

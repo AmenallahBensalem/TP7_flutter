@@ -17,7 +17,7 @@ import 'package:flutter/foundation.dart';
 /// 3. **Dernière position connue** ([Geolocator.getLastKnownPosition]) – Rapide,
 ///    fonctionne même si le GPS vient juste d'être activé.
 /// 4. **Position fraîche** ([Geolocator.getCurrentPosition]) – Fallback avec
-///    `LocationAccuracy.high` (GPS satellitaire), timeout 30 s.
+///    `LocationAccuracy.high` (GPS satellitaire), timeout 10 s.
 ///
 /// ### Utilisation
 /// ```dart
