@@ -23,7 +23,7 @@ void main() {
       'lat': 40.71,
       'lng': -74.00,
       'created_at': '2024-01-01T00:00:00Z',
-      'is_synced': 0,
+      'sync_status': 'pending',
     });
 
     final clients = await service.getUnsyncedClients();
@@ -31,18 +31,30 @@ void main() {
     expect(clients[0]['name'], 'Alice');
   });
 
-  test('markClientAsSynced removes client from unsynced list', () async {
+    test('markClientAsSynced removes client from unsynced list', () async {
     await service.insertClientLocally({
       'id': 'a1',
       'name': 'Bob',
       'lat': null,
       'lng': null,
       'created_at': '2024-01-01T00:00:00Z',
-      'is_synced': 0,
+      'sync_status': 'pending',
     });
     await service.markClientAsSynced('a1');
 
     expect(await service.getUnsyncedClients(), isEmpty);
     expect((await service.getClients()).length, 1);
+  });
+  
+
+    test('failed clients are retried (still returned as unsynced)', () async {
+    await service.insertClientLocally({
+      'id': 'f1',
+      'name': 'Carl',
+      'created_at': '2024-01-01T00:00:00Z',
+      'sync_status': 'failed',
+    });
+
+    expect((await service.getUnsyncedClients()).length, 1);
   });
 }

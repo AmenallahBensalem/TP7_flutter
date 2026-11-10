@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'providers/connectivity_provider.dart';
 import 'queue_provider.dart';
+import 'widgets/client_card.dart';
+import 'widgets/offline_banner.dart';
 
 /// Widget racine de l'application Waiting Room.
 ///
@@ -27,8 +30,7 @@ class WaitingRoomApp extends StatelessWidget {
 /// - **Supprimer** un client individuel (icône poubelle)
 /// - **Passer au suivant** (bouton « Next Client » – supprime le premier de la file)
 ///
-/// Utilise [Consumer] de `provider` pour se reconstruire automatiquement
-/// dès que [QueueProvider] notifie un changement.
+/// Affiche une [OfflineBanner] en haut de l'écran selon l'état de la connexion.
 class WaitingRoomPage extends StatefulWidget {
   const WaitingRoomPage({super.key});
   @override
@@ -77,58 +79,75 @@ class _WaitingRoomPageState extends State<WaitingRoomPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Waiting Room'), centerTitle: true),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _controller,
-                    decoration: const InputDecoration(hintText: 'Enter name'),
-                    onSubmitted: (_) => _add(),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                ElevatedButton(onPressed: _add, child: const Text('Add')),
-              ],
-            ),
-            const SizedBox(height: 20),
-            Expanded(
-              child: Consumer<QueueProvider>(
-                builder: (context, provider, _) {
-                  if (provider.clients.isEmpty) {
-                    return const Center(child: Text('No one in queue yet...'));
-                  }
-                  return ListView.builder(
-                    itemCount: provider.clients.length,
-                    itemBuilder: (context, i) {
-                      final c = provider.clients[i];
-                      return Card(
-                        child: ListTile(
-                          title: Text(c.name),
-                          subtitle: Text(c.createdAt.toString().split(' ')[0]),
-                          trailing: IconButton(
-                            icon: const Icon(Icons.delete, color: Colors.red),
-                            onPressed: () => provider.removeClient(c.id),
-                          ),
+      body: Column(
+        children: [
+          // Bannière de connectivité (pleine largeur, masquée si online)
+          Consumer<ConnectivityProvider>(
+            builder: (_, conn, _) => OfflineBanner(status: conn.status),
+          ),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _controller,
+                          decoration:
+                              const InputDecoration(hintText: 'Enter name'),
+                          onSubmitted: (_) => _add(),
                         ),
-                      );
-                    },
-                  );
-                },
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton(onPressed: _add, child: const Text('Add')),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                  Expanded(
+                    child: Consumer<QueueProvider>(
+                      builder: (context, provider, _) {
+                        if (provider.clients.isEmpty) {
+                          return const Center(
+                              child: Text('No one in queue yet...'));
+                        }
+                        return ListView.builder(
+                          itemCount: provider.clients.length,
+                          itemBuilder: (context, i) {
+                            final c = provider.clients[i];
+                            return Dismissible(
+                              key: ValueKey(c.id),
+                              direction: DismissDirection.endToStart,
+                              background: Container(
+                                color: Colors.red,
+                                alignment: Alignment.centerRight,
+                                padding: const EdgeInsets.only(right: 16),
+                                child: const Icon(Icons.delete,
+                                    color: Colors.white),
+                              ),
+                              onDismissed: (_) => provider.removeClient(c.id),
+                              child: ClientCard(client: c),
+                            );
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  ElevatedButton.icon(
+                    onPressed: () =>
+                        context.read<QueueProvider>().nextClient(),
+                    icon: const Icon(Icons.arrow_forward),
+                    label: const Text('Next Client'),
+                    style:
+                        ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(height: 20),
-            ElevatedButton.icon(
-              onPressed: () => context.read<QueueProvider>().nextClient(),
-              icon: const Icon(Icons.arrow_forward),
-              label: const Text('Next Client'),
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

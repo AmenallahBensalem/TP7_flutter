@@ -105,7 +105,7 @@ class GeolocationService {
 
       final position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
-        timeLimit: const Duration(seconds: 30),
+        timeLimit: const Duration(seconds: 10),
       );
 
       debugPrint(
@@ -117,7 +117,7 @@ class GeolocationService {
       return position;
     } on TimeoutException {
       debugPrint(
-        'GEO ERROR: Timeout — le GPS provider n\'a pas répondu en 30s.\n'
+        'GEO ERROR: Timeout — le GPS provider n\'a pas répondu en 10s.\n'
         'Sur émulateur : s\'assurer que le signal GPS est injecté via\n'
         '  Extended Controls > Location > Set Location (lat=36.4510, lng=10.7350)\n'
         '  et que "Enable GPS signal" est activé.',

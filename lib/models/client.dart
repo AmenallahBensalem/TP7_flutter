@@ -1,75 +1,77 @@
-/// {@template client}
-/// Modèle de données représentant un client dans la file d'attente.
+import 'sync_status.dart';
+
+/// Client de la file d'attente.
 ///
-/// Chaque client possède :
-/// - un identifiant unique [id] (UUID v4)
-/// - un [name] (nom affiché dans la liste)
-/// - des coordonnées GPS optionnelles [lat] / [lng]
-/// - un horodatage [createdAt] (UTC)
-/// - un flag [isSynced] indiquant si l'enregistrement a été envoyé à Supabase
-/// {@endtemplate}
+/// [toSupabaseMap] contient uniquement les données métier.
+/// [toLocalMap] ajoute le statut de synchronisation (local uniquement).
 class Client {
-  /// Identifiant unique du client (UUID v4).
   final String id;
-
-  /// Nom du client tel que saisi par l'utilisateur.
   final String name;
-
-  /// Latitude GPS au moment de l'ajout (null si GPS indisponible).
   final double? lat;
-
-  /// Longitude GPS au moment de l'ajout (null si GPS indisponible).
   final double? lng;
-
-  /// Date et heure d'inscription du client (UTC).
+  final double? locationAccuracy;
   final DateTime createdAt;
+  final SyncStatus syncStatus;
 
-  /// Indique si le client a été synchronisé avec Supabase.
-  ///
-  /// `true`  → enregistrement présent dans la table distante
-  /// `false` → en attente de synchronisation (mode hors ligne)
-  final bool isSynced;
-
-  /// {@macro client}
-  Client({
+  const Client({
     required this.id,
     required this.name,
     this.lat,
     this.lng,
+    this.locationAccuracy,
     required this.createdAt,
-    this.isSynced = true,
+    this.syncStatus = SyncStatus.synced,
   });
 
-  /// Crée un [Client] à partir d'une [Map] issue de SQLite ou de Supabase.
-  ///
-  /// Les champs `lat` et `lng` sont optionnels (peuvent être `null`).
-  /// Le champ `is_synced` est interprété comme un entier (0 = false, 1 = true).
-  factory Client.fromMap(Map<String, dynamic> m) {
+  bool get hasLocation => lat != null && lng != null;
+  bool get isSynced => syncStatus == SyncStatus.synced;
+
+  String get locationText {
+    if (!hasLocation) return 'Location not captured';
+    return '${lat!.toStringAsFixed(4)}, ${lng!.toStringAsFixed(4)}';
+  }
+
+  Map<String, dynamic> toSupabaseMap() => {
+        'id': id,
+        'name': name,
+        'lat': lat,
+        'lng': lng,
+        'location_accuracy_m': locationAccuracy,
+        'created_at': createdAt.toUtc().toIso8601String(),
+      };
+
+  Map<String, dynamic> toLocalMap() => {
+        ...toSupabaseMap(),
+        'sync_status': syncStatus.name,
+      };
+
+  factory Client.fromSupabaseMap(Map<String, dynamic> map) {
     return Client(
-      id: m['id'].toString(),
-      name: m['name'] as String,
-      lat: (m['lat'] as num?)?.toDouble(),
-      lng: (m['lng'] as num?)?.toDouble(),
-      createdAt: DateTime.parse(m['created_at'].toString()),
-      isSynced: (m['is_synced'] as num?)?.toInt() == 1,
+      id: map['id'].toString(),
+      name: map['name'] as String,
+      lat: (map['lat'] as num?)?.toDouble(),
+      lng: (map['lng'] as num?)?.toDouble(),
+      locationAccuracy: (map['location_accuracy_m'] as num?)?.toDouble(),
+      createdAt: DateTime.parse(map['created_at'].toString()),
+      syncStatus: SyncStatus.synced,
     );
   }
 
-  /// Convertit le [Client] en [Map] compatible SQLite / Supabase.
-  ///
-  /// Le flag `is_synced` est encodé comme un entier (0 ou 1)
-  /// pour la compatibilité avec SQLite qui ne gère pas les booléens natifs.
-  Map<String, dynamic> toMap() {
-    return {
-      'id': id,
-      'name': name,
-      'lat': lat,
-      'lng': lng,
-      'created_at': createdAt.toIso8601String(),
-      'is_synced': isSynced ? 1 : 0,
-    };
+  factory Client.fromLocalMap(Map<String, dynamic> map) {
+    return Client(
+      id: map['id'] as String,
+      name: map['name'] as String,
+      lat: (map['lat'] as num?)?.toDouble(),
+      lng: (map['lng'] as num?)?.toDouble(),
+      locationAccuracy: (map['location_accuracy_m'] as num?)?.toDouble(),
+      createdAt: DateTime.parse(map['created_at'].toString()),
+      syncStatus: SyncStatus.values.firstWhere(
+        (s) => s.name == map['sync_status'],
+        orElse: () => SyncStatus.pending,
+      ),
+    );
   }
 
   @override
-  String toString() => 'Client(id: $id, name: $name, created_at: $createdAt)';
+  String toString() => 'Client(id: $id, name: $name, status: ${syncStatus.name})';
 }
