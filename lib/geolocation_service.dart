@@ -47,6 +47,14 @@ class GeolocationService {
   /// - Un timeout survient (signal GPS non injecté sur émulateur)
   Future<Position?> getCurrentPosition() async {
     try {
+      if (kIsWeb) {
+        // Chrome gère la permission lors de la demande de position.
+        return await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.high,
+          timeLimit: const Duration(seconds: 10),
+        );
+      }
+
       // ── Étape 1 : Service GPS activé ? ──────────────────────────────────
       final enabled = await Geolocator.isLocationServiceEnabled();
       debugPrint('GEO: Service GPS activé = $enabled');
@@ -116,6 +124,10 @@ class GeolocationService {
 
       return position;
     } on TimeoutException {
+      if (kIsWeb) {
+        debugPrint('GEO ERROR: Le navigateur n’a pas fourni de position en 10 s.');
+        return null;
+      }
       debugPrint(
         'GEO ERROR: Timeout — le GPS provider n\'a pas répondu en 10s.\n'
         'Sur émulateur : s\'assurer que le signal GPS est injecté via\n'

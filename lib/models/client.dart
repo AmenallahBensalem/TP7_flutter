@@ -32,18 +32,18 @@ class Client {
   }
 
   Map<String, dynamic> toSupabaseMap() => {
-        'id': id,
-        'name': name,
-        'lat': lat,
-        'lng': lng,
-        'location_accuracy_m': locationAccuracy,
-        'created_at': createdAt.toUtc().toIso8601String(),
-      };
+    'id': id,
+    'name': name,
+    'lat': lat,
+    'lng': lng,
+    'location_accuracy_m': locationAccuracy,
+    'created_at': createdAt.toUtc().toIso8601String(),
+  };
 
   Map<String, dynamic> toLocalMap() => {
-        ...toSupabaseMap(),
-        'sync_status': syncStatus.name,
-      };
+    ...toSupabaseMap(),
+    'sync_status': syncStatus.name,
+  };
 
   factory Client.fromSupabaseMap(Map<String, dynamic> map) {
     return Client(
@@ -52,7 +52,10 @@ class Client {
       lat: (map['lat'] as num?)?.toDouble(),
       lng: (map['lng'] as num?)?.toDouble(),
       locationAccuracy: (map['location_accuracy_m'] as num?)?.toDouble(),
-      createdAt: DateTime.parse(map['created_at'].toString()),
+      // Les anciennes lignes sans date viennent en fin de file côté serveur.
+      createdAt: map['created_at'] == null
+          ? DateTime.utc(9999, 12, 31)
+          : DateTime.parse(map['created_at'] as String),
       syncStatus: SyncStatus.synced,
     );
   }
@@ -73,5 +76,6 @@ class Client {
   }
 
   @override
-  String toString() => 'Client(id: $id, name: $name, status: ${syncStatus.name})';
+  String toString() =>
+      'Client(id: $id, name: $name, status: ${syncStatus.name})';
 }

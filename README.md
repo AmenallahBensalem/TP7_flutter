@@ -29,7 +29,7 @@
 - Sa **date/heure** d'inscription
 - Son **statut de synchronisation** avec Supabase
 
-L'application fonctionne **hors ligne** (SQLite comme source de vérité locale) et se synchronise automatiquement avec Supabase dès qu'une connexion réseau est disponible.
+L'application vérifie le profil Supabase avant d'ouvrir la file. Une fois la file ouverte, les ajouts peuvent être stockés dans SQLite et synchronisés au retour de la connexion.
 
 ---
 
@@ -40,10 +40,10 @@ L'application fonctionne **hors ligne** (SQLite comme source de vérité locale)
 | ➕ Ajout de client | Enregistrement avec nom + coordonnées GPS |
 | 📍 Géolocalisation GPS | Récupération robuste avec `getLastKnownPosition` + fallback `getCurrentPosition` |
 | 💾 Persistance locale | SQLite via `sqflite` (offline-first) |
-| ☁️ Synchronisation Supabase | `upsert` automatique dès connexion disponible |
+| ☁️ Synchronisation Supabase | Insertion idempotente par RPC au retour de la connexion |
 | 🔄 Temps réel | Écoute du stream Supabase pour les mises à jour distantes |
-| ⏩ Client suivant | Retire le premier client de la file |
-| 🗑️ Suppression | Suppression locale + distante |
+| ⏩ Client suivant | Retire le premier client via une RPC réservée à l'admin |
+| 🗑️ Suppression | Geste réservé à l'admin, confirmé par Supabase |
 | 📶 Détection réseau | `connectivity_plus` pour déclencher la sync au retour en ligne |
 
 ---
@@ -104,7 +104,7 @@ QueueProvider.addClient(name)
 | `provider` | ^6.0.0 | Gestion d'état (`ChangeNotifier`) |
 | `geolocator` | ^11.0.0 | Récupération de la position GPS |
 | `sqflite` | ^2.3.0 | Base de données locale SQLite |
-| `supabase_flutter` | ^2.7.0 | Backend temps réel + auth anonyme |
+| `supabase_flutter` | ^2.7.0 | Backend temps réel et authentification email/mot de passe |
 | `connectivity_plus` | ^6.0.0 | Détection de la connectivité réseau |
 | `flutter_dotenv` | ^5.1.0 | Variables d'environnement (`.env`) |
 | `uuid` | ^4.0.0 | Génération d'identifiants uniques |
@@ -164,30 +164,34 @@ SUPABASE_URL=https://xxxxxxxxxxxxxxxxxxxx.supabase.co
 SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
 
-#### Schéma de la table Supabase
+#### Authentification et politiques
+
+Sur le schéma existant avec `public.clients` et un identifiant UUID unique,
+exécuter la [migration Auth/RLS](supabase/migrations/202611170001_queue_auth.sql)
+une fois dans le SQL Editor. Elle remplace les anciennes politiques de
+`clients` et garde les lignes existantes.
+
+Dans **Authentication → Providers → Email**, désactiver **Confirm email**
+sur le projet de développement. Créer ensuite le premier compte via
+**Créer un compte**, puis retrouver son UUID dans **Authentication → Users**
+et exécuter dans le SQL Editor :
 
 ```sql
-CREATE TABLE clients (
-  id         TEXT PRIMARY KEY,
-  name       TEXT NOT NULL,
-  lat        DOUBLE PRECISION,
-  lng        DOUBLE PRECISION,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- Activer Row Level Security
-ALTER TABLE clients ENABLE ROW LEVEL SECURITY;
-
--- Politique pour les utilisateurs anonymes
-CREATE POLICY "anon_all" ON clients
-  FOR ALL TO anon USING (true) WITH CHECK (true);
+update public.profiles
+set role = 'admin', status = 'approved'
+where id = 'UUID_DU_COMPTE_INSCRIT'::uuid
+returning id, email, role, status;
 ```
+
+Vérifier qu'une seule ligne est renvoyée. Se reconnecter avec ce compte
+pour ouvrir **Demandes en attente** et traiter les inscriptions.
 
 ### 4. Installer les dépendances et lancer
 
 ```bash
 flutter pub get
 flutter run
+flutter run -d chrome --web-port=50809 --no-web-resources-cdn
 ```
 
 ---

@@ -6,21 +6,27 @@ import '../local_queue_service.dart';
 class QueueRepository {
   final SupabaseClient _supabase;
   final LocalQueueService _local;
+  final String? _accountId;
 
-  QueueRepository(this._supabase, this._local);
+  QueueRepository(this._supabase, this._local)
+    : _accountId = _supabase.auth.currentUser?.id;
 
   LocalQueueService get local => _local;
 
   /// Enregistre un client côté serveur via la fonction RPC (idempotent).
   Future<void> registerOnServer(Client client) async {
-    await _supabase.rpc('register_queue_client', params: {
-      'p_id': client.id,
-      'p_name': client.name,
-      'p_lat': client.lat,
-      'p_lng': client.lng,
-      'p_accuracy': client.locationAccuracy,
-      'p_created_at': client.createdAt.toUtc().toIso8601String(),
-    });
+    _requireCurrentAccount();
+    await _supabase.rpc(
+      'register_queue_client',
+      params: {
+        'p_id': client.id,
+        'p_name': client.name,
+        'p_lat': client.lat,
+        'p_lng': client.lng,
+        'p_accuracy': client.locationAccuracy,
+        'p_created_at': client.createdAt.toUtc().toIso8601String(),
+      },
+    );
   }
 
   /// Récupère une page de clients, triés par date de création croissante.
@@ -39,6 +45,29 @@ class QueueRepository {
   }
 
   Future<void> deleteOnServer(String id) async {
-    await _supabase.from('clients').delete().eq('id', id);
+    _requireCurrentAccount();
+    final row = await _supabase
+        .from('clients')
+        .delete()
+        .eq('id', id)
+        .select('id')
+        .maybeSingle();
+    if (row == null) {
+      throw StateError('Client indisponible pour la suppression.');
+    }
+  }
+
+  Future<String> nextOnServer(String expectedId) async {
+    _requireCurrentAccount();
+    return await _supabase.rpc<String>(
+      'next_client',
+      params: {'p_expected_id': expectedId},
+    );
+  }
+
+  void _requireCurrentAccount() {
+    if (_accountId == null || _supabase.auth.currentUser?.id != _accountId) {
+      throw StateError('La session a changé.');
+    }
   }
 }

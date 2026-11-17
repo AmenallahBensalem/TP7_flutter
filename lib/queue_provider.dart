@@ -136,8 +136,9 @@ class QueueProvider extends ChangeNotifier {
 
       // 5. Synchroniser les données.
       await _syncLocalToRemote();
-    } catch (e) {
-      debugPrint('Initialize failed: $e');
+    } catch (e, stackTrace) {
+      debugPrint('Queue initialization failed (${e.runtimeType}): $e');
+      debugPrintStack(stackTrace: stackTrace);
 
       if (_disposed) return;
 
@@ -157,6 +158,7 @@ class QueueProvider extends ChangeNotifier {
 
     try {
       await _syncLocalToRemote();
+      await _restartRealtime();
     } catch (e) {
       debugPrint('Refresh failed: $e');
 
@@ -176,7 +178,7 @@ class QueueProvider extends ChangeNotifier {
     if (_disposed) return;
 
     final loaded = rows.map(Client.fromLocalMap).toList()
-      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      ..sort(_compareClients);
 
     _allClients
       ..clear()
@@ -187,6 +189,11 @@ class QueueProvider extends ChangeNotifier {
         : QueueState.loaded;
 
     _notify();
+  }
+
+  static int _compareClients(Client a, Client b) {
+    final byDate = a.createdAt.compareTo(b.createdAt);
+    return byDate == 0 ? a.id.compareTo(b.id) : byDate;
   }
 
   // ── Supabase Realtime ────────────────────────────────
@@ -275,9 +282,7 @@ class QueueProvider extends ChangeNotifier {
 
     _allClients.add(client);
 
-    _allClients.sort(
-      (a, b) => a.createdAt.compareTo(b.createdAt),
-    );
+    _allClients.sort(_compareClients);
 
     if (_state == QueueState.empty) {
       _state = QueueState.loaded;
@@ -383,25 +388,9 @@ class QueueProvider extends ChangeNotifier {
 
   Future<void> removeClient(String id) async {
     if (_disposed) return;
-
-    // Suppression immédiate de l'affichage.
-    _allClients.removeWhere((c) => c.id == id);
-
-    if (_allClients.isEmpty) {
-      _state = QueueState.empty;
-    }
-
-    _notify();
-
-    // Suppression SQLite.
+    await _repository.deleteOnServer(id);
     await _localDb.deleteClient(id);
-
-    // Suppression distante.
-    try {
-      await _repository.deleteOnServer(id);
-    } catch (e) {
-      debugPrint('Remove failed (offline?): $e');
-    }
+    if (!_disposed) await _reloadFromLocal();
   }
 
   // ── Client suivant ───────────────────────────────────
@@ -409,7 +398,9 @@ class QueueProvider extends ChangeNotifier {
   Future<void> nextClient() async {
     if (_allClients.isEmpty || _disposed) return;
 
-    await removeClient(_allClients.first.id);
+    final id = await _repository.nextOnServer(_allClients.first.id);
+    await _localDb.deleteClient(id);
+    if (!_disposed) await _reloadFromLocal();
   }
 
   // ── Libération des ressources ────────────────────────

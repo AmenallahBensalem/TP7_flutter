@@ -4,18 +4,25 @@ import 'models/sync_status.dart';
 
 /// Stockage SQLite local (offline-first).
 class LocalQueueService {
-  static Database? _database;
+  Future<Database>? _opening;
   static const String tableName = 'local_clients';
   static const int _dbVersion = 2;
 
   final bool _inMemory;
+  final String? _accountId;
 
-  LocalQueueService({bool inMemory = false}) : _inMemory = inMemory;
+  LocalQueueService({bool inMemory = false, String? accountId})
+    : _inMemory = inMemory,
+      _accountId = accountId;
 
   Future<Database> get database async {
-    if (_database != null) return _database!;
-    _database = await _initDB();
-    return _database!;
+    final opening = _opening ??= _initDB();
+    try {
+      return await opening;
+    } catch (_) {
+      if (identical(_opening, opening)) _opening = null;
+      rethrow;
+    }
   }
 
   Future<Database> _initDB() async {
@@ -27,7 +34,10 @@ class LocalQueueService {
       );
     }
     final dbPath = await getDatabasesPath();
-    final path = join(dbPath, 'waiting_room.db');
+    final fileName = _accountId == null
+        ? 'waiting_room.db'
+        : 'waiting_room_$_accountId.db';
+    final path = join(dbPath, fileName);
     return openDatabase(
       path,
       version: _dbVersion,
@@ -54,11 +64,14 @@ class LocalQueueService {
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
       await db.execute(
-          'ALTER TABLE $tableName ADD COLUMN location_accuracy_m REAL');
+        'ALTER TABLE $tableName ADD COLUMN location_accuracy_m REAL',
+      );
       await db.execute(
-          "ALTER TABLE $tableName ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'pending'");
+        "ALTER TABLE $tableName ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'pending'",
+      );
       await db.execute(
-          "UPDATE $tableName SET sync_status = CASE WHEN is_synced = 1 THEN 'synced' ELSE 'pending' END");
+        "UPDATE $tableName SET sync_status = CASE WHEN is_synced = 1 THEN 'synced' ELSE 'pending' END",
+      );
     }
   }
 
@@ -106,10 +119,11 @@ class LocalQueueService {
   }
 
   Future<void> close() async {
-    final db = _database;
-    if (db != null) {
+    final opening = _opening;
+    if (opening != null) {
+      final db = await opening;
       await db.close();
-      _database = null;
+      _opening = null;
     }
   }
 }
